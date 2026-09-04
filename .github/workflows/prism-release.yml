@@ -1,0 +1,114 @@
+name: Prism release
+on:
+  push:
+    tags: ["v*-prism.*"]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./sdk/cliproxy/auth ./internal/api/handlers/management
+  binary:
+    needs: verify
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64, asset: linux_amd64}
+          - {goos: linux, goarch: arm64, asset: linux_aarch64}
+          - {goos: darwin, goarch: amd64, asset: darwin_amd64}
+          - {goos: darwin, goarch: arm64, asset: darwin_aarch64}
+          - {goos: windows, goarch: amd64, asset: windows_amd64}
+          - {goos: windows, goarch: arm64, asset: windows_aarch64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build portable engine
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ASSET: ${{ matrix.asset }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          binary=cli-proxy-api
+          if [[ "$GOOS" == windows ]]; then binary=cli-proxy-api.exe; fi
+          mkdir -p package dist
+          go build -trimpath -buildvcs=false -ldflags="-s -w -X main.Version=$version -X main.Commit=$GITHUB_SHA" -o "package/$binary" ./cmd/server
+          cp LICENSE config.example.yaml package/
+          if [[ "$GOOS" == windows ]]; then
+            (cd package && zip -q "../dist/CLIProxyAPI_${version}_${ASSET}.zip" *)
+          else
+            tar -C package -czf "dist/CLIProxyAPI_${version}_${ASSET}.tar.gz" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: binary
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish checksummed artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum CLIProxyAPI_* > checksums.txt)
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Prism $GITHUB_REF_NAME" --notes "Maintained CLIProxyAPI fork: account lifecycle, primary-owned refresh, and Claude/Codex quota compatibility. Portable builds disable native plugins. Artifacts are cross-compiled; Linux amd64 runtime tests run in this workflow."
+  image:
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Prepare Linux images
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p image/linux/amd64 image/linux/arm64
+          tar -xzf "dist/CLIProxyAPI_${version}_linux_amd64.tar.gz" -C image/linux/amd64
+          tar -xzf "dist/CLIProxyAPI_${version}_linux_aarch64.tar.gz" -C image/linux/arm64
+          cp fork/Dockerfile image/Dockerfile
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: image
+        with:
+          context: image
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+      - name: Record immutable image
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: echo "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
