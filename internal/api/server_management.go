@@ -120,6 +120,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
+		mgmt.GET("/quota-scheduler/status", s.mgmt.GetQuotaSchedulerStatus)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
 		mgmt.PATCH("/routing/strategy", s.mgmt.PutRoutingStrategy)
 
