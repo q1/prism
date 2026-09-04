@@ -115,7 +115,7 @@ func (m *Manager) queueRefreshUnschedule(authID string) {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil {
+	if a == nil || authRefreshDisabled(a) {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) {
@@ -354,6 +354,15 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+// authRefreshDisabled marks a serving credential whose rotation is owned elsewhere.
+func authRefreshDisabled(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	disabled, _ := auth.Metadata["refresh_disabled"].(bool)
+	return disabled
+}
+
 func authHasRefreshCredential(auth *Auth) bool {
 	if authMetadataString(auth, "refresh_token") != "" {
 		return true
@@ -413,7 +422,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if isRequestScopedError(execErr) {
 		return auth, false
 	}
-	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
+	if authRefreshDisabled(auth) || !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
@@ -464,6 +473,10 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+
+	if authRefreshDisabled(auth) {
+		return nil, errors.New("credential refresh is owned by another gateway")
 	}
 
 	// Another request may already have refreshed this credential.
