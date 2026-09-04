@@ -1,0 +1,26 @@
+name: Prism CI
+on:
+  push:
+    branches: [prism, "sync/**"]
+  pull_request:
+    branches: [prism]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: prism-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test management and account lifecycle
+        run: go test ./internal/api/handlers/management ./sdk/cliproxy/auth
+      - name: Build the gateway
+        run: go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
