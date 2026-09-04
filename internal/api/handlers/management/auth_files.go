@@ -372,6 +372,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
+	entry["requires_login"] = auth.RequiresLogin()
 	if expiry, ok := auth.ExpirationTime(); ok && !expiry.IsZero() {
 		entry["expires_at"] = expiry
 	}

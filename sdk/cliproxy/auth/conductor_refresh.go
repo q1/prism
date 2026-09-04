@@ -115,7 +115,7 @@ func (m *Manager) queueRefreshUnschedule(authID string) {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil || authRefreshDisabled(a) {
+	if a == nil || authRefreshDisabled(a) || a.RequiresLogin() {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) {
@@ -354,6 +354,24 @@ func authAccessToken(auth *Auth) string {
 	return authMetadataString(auth, "accessToken")
 }
 
+// RequiresLogin is persisted with the credential so replicas and restarts cannot
+// silently restore a revoked refresh credential to the routing pool.
+func (auth *Auth) RequiresLogin() bool {
+	if auth == nil {
+		return false
+	}
+	required, _ := auth.Metadata["requires_login"].(bool)
+	return required
+}
+
+func terminalRefreshFailure(err error) bool {
+	if isUnauthorizedError(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "invalid_grant") || strings.Contains(message, "refresh_token_reused") || strings.Contains(message, "refresh_token_expired") || strings.Contains(message, "refresh_token_revoked")
+}
+
 // authRefreshDisabled marks a serving credential whose rotation is owned elsewhere.
 func authRefreshDisabled(auth *Auth) bool {
 	if auth == nil {
@@ -475,7 +493,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		return nil, errors.New("auth or executor not found")
 	}
 
-	if authRefreshDisabled(auth) {
+	if authRefreshDisabled(auth) || auth.RequiresLogin() {
 		return nil, errors.New("credential refresh is owned by another gateway")
 	}
 
@@ -495,7 +513,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
-		unauthorized := isUnauthorizedError(err)
+		terminal := authHasRefreshCredential(auth) && terminalRefreshFailure(err)
+		unauthorized := isUnauthorizedError(err) || terminal
+		var quarantine *Auth
 		shouldReschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
@@ -508,12 +528,20 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			current.LastError = refreshErrorFromError(err)
 
 			hasValidAccessToken := current.HasValidAccessToken(now)
-			if !hasValidAccessToken {
+			if !hasValidAccessToken || terminal {
 				current.Unavailable = true
 				current.Status = StatusError
 				if unauthorized {
 					current.NextRefreshAfter = time.Time{}
 					current.StatusMessage = "unauthorized"
+					if terminal {
+						current.StatusMessage = "Sign-in required"
+						if current.Metadata == nil {
+							current.Metadata = make(map[string]any)
+						}
+						current.Metadata["requires_login"] = true
+						quarantine = current.Clone()
+					}
 				} else {
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
@@ -537,6 +565,12 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 			}
 		}
 		m.mu.Unlock()
+		if quarantine != nil {
+			if errPersist := m.persist(ctx, quarantine); errPersist != nil {
+				log.Warn("could not persist credential sign-in requirement")
+			}
+		}
+
 		if shouldReschedule {
 			m.queueRefreshReschedule(id)
 		}
@@ -553,6 +587,7 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
 	updated.LastError = nil
+	delete(updated.Metadata, "requires_login")
 	updated.StatusMessage = ""
 	updated.Unavailable = false
 	if updated.Status == StatusError || updated.Status == "" {
