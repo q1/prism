@@ -125,3 +125,59 @@ func TestFileTokenStore_Save_DisabledStorageBackedRuntimeDoesNotRecreateMissingF
 		t.Fatalf("removed credential was recreated or stat failed: %v", errStat)
 	}
 }
+
+func TestFileTokenStore_DisabledCreationPaths(t *testing.T) {
+	for _, storageBacked := range []bool{false, true} {
+		for _, mode := range []string{"runtime", "creation-intent", "import"} {
+			name := "metadata/" + mode
+			if storageBacked {
+				name = "storage/" + mode
+			}
+			t.Run(name, func(t *testing.T) {
+				directory := t.TempDir()
+				store := NewFileTokenStore()
+				store.SetBaseDir(directory)
+				account := &cliproxyauth.Auth{
+					ID: "fixture.json", Provider: "test", Disabled: true,
+					Metadata: map[string]any{"type": "test"},
+				}
+				if storageBacked {
+					account.Storage = &testTokenStorage{}
+				}
+				ctx := context.Background()
+				if mode == "creation-intent" {
+					ctx = cliproxyauth.WithAuthCreationIntent(ctx)
+				}
+				save := store.Save
+				if mode == "import" {
+					save = store.SaveImported
+				}
+				saved, errSave := save(ctx, account)
+				if errSave != nil {
+					t.Fatal(errSave)
+				}
+				path := filepath.Join(directory, account.ID)
+				if mode == "runtime" {
+					if _, errStat := os.Stat(path); !os.IsNotExist(errStat) || saved != "" {
+						t.Fatal("routine save recreated a missing disabled credential")
+					}
+					return
+				}
+				if saved != path {
+					t.Fatalf("saved path = %q, want %q", saved, path)
+				}
+				raw, errRead := os.ReadFile(path)
+				if errRead != nil {
+					t.Fatal(errRead)
+				}
+				var metadata map[string]any
+				if errJSON := json.Unmarshal(raw, &metadata); errJSON != nil {
+					t.Fatal(errJSON)
+				}
+				if metadata["disabled"] != true {
+					t.Fatal("explicit creation lost disabled state")
+				}
+			})
+		}
+	}
+}
