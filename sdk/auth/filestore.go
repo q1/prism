@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -74,6 +75,22 @@ func (s *FileTokenStore) SetBaseDir(dir string) {
 
 // Save persists token storage and metadata to the resolved auth file path.
 func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+	return s.save(ctx, auth, false)
+}
+
+// SaveImported persists an explicitly imported file, including a newly disabled
+// account. Routine refresh saves keep their existing disabled-account behavior.
+func (s *FileTokenStore) SaveImported(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+	return s.save(ctx, auth, true)
+}
+
+func (s *FileTokenStore) save(ctx context.Context, auth *cliproxyauth.Auth, imported bool) (string, error) {
+	return s.saveWithDirectorySync(ctx, auth, imported, syncCredentialDirectory)
+}
+
+// The directory sync callback is passed per call for deterministic fault tests;
+// production saves always use the real filesystem implementation above.
+func (s *FileTokenStore) saveWithDirectorySync(ctx context.Context, auth *cliproxyauth.Auth, imported bool, syncDirectory func(string) error) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -90,7 +107,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	if auth.Disabled && !imported {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
@@ -108,48 +125,32 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		SetMetadata(map[string]any)
 	}
 
-	switch {
-	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
-		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
-		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
-			return "", err
-		}
-	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
-		raw, errMarshal := json.Marshal(auth.Metadata)
-		if errMarshal != nil {
-			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
-		}
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
-				break
+	// Never truncate a credential in place. Provider serializers and metadata
+	// writes both prepare a private sibling; one rename is the publication point.
+	err = saveCredentialAtomicallyWithDirectorySync(path, func(staged string) error {
+		switch {
+		case auth.Storage != nil:
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
 			}
-			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-			if errOpen != nil {
-				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
+			auth.Metadata["disabled"] = auth.Disabled
+			if setter, ok := auth.Storage.(metadataSetter); ok {
+				setter.SetMetadata(auth.Metadata)
 			}
-			if _, errWrite := file.Write(raw); errWrite != nil {
-				_ = file.Close()
-				return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
+			return auth.Storage.SaveTokenToFile(staged)
+		case auth.Metadata != nil:
+			auth.Metadata["disabled"] = auth.Disabled
+			raw, errMarshal := json.Marshal(auth.Metadata)
+			if errMarshal != nil {
+				return errMarshal
 			}
-			if errClose := file.Close(); errClose != nil {
-				return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
-			}
-			break
-		} else if !os.IsNotExist(errRead) {
-			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+			return os.WriteFile(staged, raw, 0o600)
+		default:
+			return fmt.Errorf("auth filestore: nothing to persist")
 		}
-		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
-		}
-	default:
-		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
+	}, syncDirectory)
+	if err != nil && !errors.Is(err, cliproxyauth.ErrPersistenceDurabilityUncertain) {
+		return "", fmt.Errorf("auth filestore: atomic save failed: %w", err)
 	}
 
 	if auth.Attributes == nil {
@@ -163,7 +164,76 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		auth.FileName = auth.ID
 	}
 
-	return path, nil
+	return path, err
+}
+
+func saveCredentialAtomically(path string, prepare func(string) error) error {
+	return saveCredentialAtomicallyWithDirectorySync(path, prepare, syncCredentialDirectory)
+}
+
+func saveCredentialAtomicallyWithDirectorySync(path string, prepare func(string) error, syncDirectory func(string) error) error {
+	file, errCreate := os.CreateTemp(filepath.Dir(path), ".auth-pending-")
+	if errCreate != nil {
+		return errCreate
+	}
+	staged := file.Name()
+	defer func() { _ = os.Remove(staged) }()
+	if errClose := file.Close(); errClose != nil {
+		return errClose
+	}
+	if errPrepare := prepare(staged); errPrepare != nil {
+		return errPrepare
+	}
+	if previous, errRead := os.ReadFile(path); errRead == nil {
+		prepared, errPrepared := os.ReadFile(staged)
+		info, errInfo := os.Lstat(path)
+		if errPrepared == nil && errInfo == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0 && jsonEqual(previous, prepared) {
+			// Retry a previously uncertain directory sync even when bytes match.
+			// Skipping it could falsely acknowledge a retry as durable success.
+			if errDirectory := syncDirectory(filepath.Dir(path)); errDirectory != nil {
+				return &cliproxyauth.PersistenceCommittedError{Cause: errDirectory}
+			}
+			return nil
+		}
+	}
+	if errMode := os.Chmod(staged, 0o600); errMode != nil {
+		return errMode
+	}
+	file, errOpen := os.OpenFile(staged, os.O_RDWR, 0)
+	if errOpen != nil {
+		return errOpen
+	}
+	errSync := file.Sync()
+	errClose := file.Close()
+	if errSync != nil {
+		return errSync
+	}
+	if errClose != nil {
+		return errClose
+	}
+	if errRename := os.Rename(staged, path); errRename != nil {
+		return errRename
+	}
+	if errDirectory := syncDirectory(filepath.Dir(path)); errDirectory != nil {
+		return &cliproxyauth.PersistenceCommittedError{Cause: errDirectory}
+	}
+	return nil
+}
+
+func syncCredentialDirectory(path string) error {
+	// Unix directory synchronization makes a published rename survive a crash.
+	if runtime.GOOS != "windows" {
+		directory, errOpen := os.Open(path)
+		if errOpen != nil {
+			return errOpen
+		}
+		errSync := directory.Sync()
+		_ = directory.Close()
+		if errSync != nil {
+			return errSync
+		}
+	}
+	return nil
 }
 
 // List enumerates all auth JSON files under the configured directory.
