@@ -21,6 +21,10 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test management and account lifecycle
-        run: go test ./internal/api/handlers/management ./sdk/cliproxy/auth
-      - name: Build the gateway
-        run: go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
+        run: go test ./internal/api/handlers/management ./sdk/auth ./sdk/cliproxy ./internal/registry ./sdk/cliproxy/auth ./internal/prismsync ./cmd/prism-sync
+      - name: Race-check account control and synchronization
+        run: go test -race ./sdk/auth ./sdk/cliproxy ./internal/registry ./sdk/cliproxy/auth ./internal/api/handlers/management ./internal/prismsync ./cmd/prism-sync
+      - name: Build the independent gateway and sync tool
+        run: |
+          go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
+          go build -o "$RUNNER_TEMP/prism-sync" ./cmd/prism-sync

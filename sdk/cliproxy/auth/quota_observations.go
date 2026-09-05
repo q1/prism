@@ -48,11 +48,22 @@ func ObservedQuotaWindows(provider string, quota QuotaState, now time.Time) map[
 			deadline = &stamp
 		}
 		known := deadline == nil || deadline.After(now)
-		windows[name] = ObservedQuotaWindow{UsedPercent: value, ResetAt: deadline, Known: known, HardLimited: limited && known}
+		measurement := ObservedQuotaWindow{UsedPercent: value, ResetAt: deadline, Known: known, HardLimited: limited && known}
+		// Provider aliases can coexist during schema transitions. Never let a
+		// later alias erase an exhausted window or shorten its measured reset.
+		if previous, exists := windows[name]; exists {
+			measurement.UsedPercent = math.Max(measurement.UsedPercent, previous.UsedPercent)
+			measurement.Known = measurement.Known && previous.Known
+			measurement.HardLimited = measurement.HardLimited || previous.HardLimited
+			if previous.ResetAt != nil && (measurement.ResetAt == nil || previous.ResetAt.After(*measurement.ResetAt)) {
+				measurement.ResetAt = previous.ResetAt
+			}
+		}
+		windows[name] = measurement
 	}
 	switch strings.ToLower(provider) {
 	case "claude":
-		for _, window := range []struct{ suffix, name string }{{"5h", "five_hour"}, {"7d", "seven_day"}, {"7d-fable", "fable"}} {
+		for _, window := range []struct{ suffix, name string }{{"5h", "five_hour"}, {"7d", "seven_day"}, {"7d-fable", "fable"}, {"7d_oi", "fable"}} {
 			prefix := "Anthropic-Ratelimit-Unified-" + window.suffix + "-"
 			add(window.name, headers.Get(prefix+"Utilization"), headers.Get(prefix+"Reset"), "", true, headers.Get(prefix+"Status") == "rejected")
 		}
@@ -79,9 +90,12 @@ func ObservedQuotaWindows(provider string, quota QuotaState, now time.Time) map[
 	return windows
 }
 
-func observedQuotaBlocked(auth *Auth, now time.Time) (bool, time.Time) {
+func observedQuotaBlocked(auth *Auth, model string, now time.Time) (bool, time.Time) {
 	var until time.Time
-	for _, window := range ObservedQuotaWindows(auth.Provider, auth.Quota, now) {
+	for name, window := range ObservedQuotaWindows(auth.Provider, auth.Quota, now) {
+		if name == "fable" && !strings.Contains(strings.ToLower(model), "fable") {
+			continue
+		}
 		if window.Known && window.UsedPercent >= 100 && window.ResetAt != nil && window.ResetAt.After(until) {
 			until = *window.ResetAt
 		}

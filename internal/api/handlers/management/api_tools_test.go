@@ -1490,3 +1490,26 @@ func TestAPICallRejectsWhenOnlyIDTokenPresentWithoutRefreshToken(t *testing.T) {
 		t.Fatal("upstream must not be hit when access token cannot be resolved")
 	}
 }
+
+func TestPrismPanelUsageNeverFollowsProviderRedirects(t *testing.T) {
+	var followed atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect-target" {
+			followed.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Redirect(w, r, "/redirect-target", http.StatusFound)
+	}))
+	defer upstream.Close()
+	handler := &Handler{cfg: &config.Config{}}
+	response := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(response)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(`{"method":"GET","url":"`+upstream.URL+`/usage"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Header.Set("X-Prism-Panel-Usage", "1")
+	handler.APICall(ctx)
+	if response.Code != http.StatusOK || followed.Load() != 0 || !strings.Contains(response.Body.String(), `"status_code":302`) {
+		t.Fatal("fixed usage request followed a provider redirect")
+	}
+}

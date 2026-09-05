@@ -5,6 +5,7 @@ RUN apk add --no-cache ca-certificates tzdata bash \
 ARG TARGETOS
 ARG TARGETARCH
 COPY --chmod=755 ${TARGETOS}/${TARGETARCH}/cli-proxy-api /CLIProxyAPI/CLIProxyAPI
+COPY --chmod=755 ${TARGETOS}/${TARGETARCH}/prism-sync /CLIProxyAPI/prism-sync
 WORKDIR /CLIProxyAPI
 USER 1000:1000
 CMD ["/CLIProxyAPI/CLIProxyAPI", "-config", "/CLIProxyAPI/config/config.yaml"]

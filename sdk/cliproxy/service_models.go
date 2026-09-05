@@ -28,17 +28,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	if ctx.Err() != nil {
 		return
 	}
-	if a.Disabled {
-		if s != nil && s.coreManager != nil {
-			if current, ok := s.coreManager.GetByID(a.ID); ok && current != nil && !current.Disabled {
-				return
-			}
-		}
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
 	if s != nil && s.coreManager != nil {
-		if current, ok := s.coreManager.GetByID(a.ID); !ok || current == nil || current.Disabled {
+		current, ok := s.coreManager.GetByID(a.ID)
+		if !ok || current == nil || current.Disabled != a.Disabled {
 			return
 		}
 	}
@@ -63,6 +55,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
 			excluded = strings.Split(val, ",")
 		}
+	}
+	if a.Disabled {
+		if models, supported := s.prismNativeModelsForAuth(a, provider, authKind, excluded); supported {
+			models = applyOAuthModelAliasForAuth(s.cfg, provider, authKind, a.Attributes, models)
+			models = applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix)
+			registry.GetGlobalRegistry().SetPrismModelCatalogForClient(a.ID, provider, models)
+		}
+		GlobalModelRegistry().UnregisterClient(a.ID)
+		return
 	}
 	if s.tryRegisterPluginModelsForAuth(ctx, a, provider, authKind, excluded) {
 		return
@@ -111,58 +112,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		models = registry.GetAntigravityModels()
+		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
 		models = applyExcludedModels(models, excluded)
-	case "claude":
-		models = registry.GetClaudeModels()
-		if entry := s.resolveConfigClaudeKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildClaudeConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
-		models = applyExcludedModels(models, excluded)
-	case "codex":
-		if authKind == "apikey" {
-			if entry := s.resolveConfigCodexKey(a); entry != nil {
-				models = buildCodexConfigModels(entry)
-				excluded = entry.ExcludedModels
-			}
-			models = applyExcludedModels(models, excluded)
-			break
-		}
-
-		codexPlanType := ""
-		if a.Attributes != nil {
-			codexPlanType = strings.TrimSpace(a.Attributes["plan_type"])
-		}
-		switch strings.ToLower(codexPlanType) {
-		case "pro":
-			models = registry.GetCodexProModels()
-		case "plus":
-			models = registry.GetCodexPlusModels()
-		case "team", "business", "go":
-			models = registry.GetCodexTeamModels()
-		case "free":
-			models = registry.GetCodexFreeModels()
-		default:
-			models = registry.GetCodexProModels()
-		}
-		models = applyExcludedModels(models, excluded)
+	case "claude", "codex", "xai":
+		models, _ = s.prismNativeModelsForAuth(a, provider, authKind, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
-		models = applyExcludedModels(models, excluded)
-	case "xai":
-		models = registry.GetXAIModels()
-		if entry := s.resolveConfigXAIKey(a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildXAIConfigModels(entry)
-			}
-			if authKind == "apikey" {
-				excluded = entry.ExcludedModels
-			}
-		}
 		models = applyExcludedModels(models, excluded)
 	case "devin":
 		models = registry.GetDevinModels()

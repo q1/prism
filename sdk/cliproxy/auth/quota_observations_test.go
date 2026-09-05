@@ -45,3 +45,25 @@ func TestClaudeMeasuredFractionAndUnknownQuota(t *testing.T) {
 		t.Fatal("unsupported quota was invented")
 	}
 }
+
+func TestClaudeFableAliasesPreserveStricterObservation(t *testing.T) {
+	now := time.Unix(1000, 0)
+	quota := QuotaState{ObservedAt: now, Signals: map[string]string{
+		"Anthropic-Ratelimit-Unified-7d-fable-Utilization": "1",
+		"Anthropic-Ratelimit-Unified-7d-fable-Reset":       "3000",
+		"Anthropic-Ratelimit-Unified-7d-fable-Status":      "rejected",
+		"Anthropic-Ratelimit-Unified-7d_oi-Utilization":    "0.1",
+		"Anthropic-Ratelimit-Unified-7d_oi-Reset":          "2000",
+	}}
+	window := ObservedQuotaWindows("claude", quota, now)["fable"]
+	if !window.Known || !window.HardLimited || window.UsedPercent != 100 || window.ResetAt == nil || window.ResetAt.Unix() != 3000 {
+		t.Fatal("Fable alias erased a stricter measured limit")
+	}
+	auth := &Auth{Provider: "claude", Quota: quota}
+	if blocked, _ := observedQuotaBlocked(auth, "claude-fable-5", now); !blocked {
+		t.Fatal("Fable remained routable while an alias is exhausted")
+	}
+	if blocked, _ := observedQuotaBlocked(auth, "claude-sonnet-4-6", now); blocked {
+		t.Fatal("Fable aliases blocked an unrelated model")
+	}
+}
