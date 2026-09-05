@@ -34,6 +34,10 @@ type Config struct {
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
+	// PrismReplica is set by the serving snapshot supervisor. Management writes
+	// are forbidden because the signed primary inventory is authoritative.
+	PrismReplica bool `yaml:"prism-replica,omitempty" json:"prism-replica,omitempty"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 

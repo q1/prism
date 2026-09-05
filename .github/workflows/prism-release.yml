@@ -12,7 +12,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go test ./sdk/cliproxy/auth ./internal/api/handlers/management
+      - run: go test ./sdk/auth ./sdk/cliproxy ./internal/registry ./sdk/cliproxy/auth ./internal/api/handlers/management ./internal/prismsync ./cmd/prism-sync
   binary:
     needs: verify
     runs-on: ubuntu-24.04
@@ -45,7 +45,11 @@ jobs:
           if [[ "$GOOS" == windows ]]; then binary=cli-proxy-api.exe; fi
           mkdir -p package dist
           go build -trimpath -buildvcs=false -ldflags="-s -w -X main.Version=$version -X main.Commit=$GITHUB_SHA" -o "package/$binary" ./cmd/server
+          sync_binary=prism-sync
+          if [[ "$GOOS" == windows ]]; then sync_binary=prism-sync.exe; fi
+          go build -trimpath -buildvcs=false -ldflags="-s -w" -o "package/$sync_binary" ./cmd/prism-sync
           cp LICENSE config.example.yaml package/
+          cp fork/docs/prism-serving-sync.md package/
           if [[ "$GOOS" == windows ]]; then
             (cd package && zip -q "../dist/CLIProxyAPI_${version}_${ASSET}.zip" *)
           else
@@ -73,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum CLIProxyAPI_* > checksums.txt)
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Prism $GITHUB_REF_NAME" --notes "Maintained CLIProxyAPI fork: account lifecycle, primary-owned refresh, and Claude/Codex quota compatibility. Portable builds disable native plugins. Artifacts are cross-compiled; Linux amd64 runtime tests run in this workflow."
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Prism $GITHUB_REF_NAME" --notes "Maintained CLIProxyAPI fork: independent transactional account control, quota-aware routing, primary-owned refresh, and signed serving-only sync. Portable builds disable native plugins. Artifacts are cross-compiled; Linux amd64 runtime tests run in this workflow."
   image:
     needs: publish
     runs-on: ubuntu-24.04

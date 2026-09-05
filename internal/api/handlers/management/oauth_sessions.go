@@ -31,13 +31,14 @@ var (
 )
 
 type oauthSession struct {
-	Provider  string
-	Status    string
-	Source    string
-	Metadata  map[string]any
-	Completed bool
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	Provider   string
+	Status     string
+	Source     string
+	Metadata   map[string]any
+	Completed  bool
+	Committing bool
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
 }
 
 type oauthSessionStore struct {
@@ -64,7 +65,7 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 
 func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	for state, session := range s.sessions {
-		if !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
+		if !session.Committing && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
 			delete(s.sessions, state)
 		}
 	}
@@ -140,6 +141,7 @@ func (s *oauthSessionStore) SetError(state, message string) {
 		return
 	}
 	session.Status = message
+	session.Committing = false
 	session.ExpiresAt = now.Add(s.ttl)
 	s.sessions[state] = session
 }
@@ -162,6 +164,7 @@ func (s *oauthSessionStore) Complete(state string) {
 	session.Status = ""
 	session.Metadata = nil
 	session.Completed = true
+	session.Committing = false
 	session.ExpiresAt = now.Add(s.completedTTL)
 	s.sessions[state] = session
 }
@@ -184,6 +187,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 			session.Status = ""
 			session.Metadata = nil
 			session.Completed = true
+			session.Committing = false
 			session.ExpiresAt = now.Add(s.completedTTL)
 			s.sessions[state] = session
 			removed++
@@ -241,11 +245,34 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 
 	s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Status != "" {
+	if !ok || session.Completed || session.Committing || session.Status != "" {
 		return false
 	}
 	delete(s.sessions, state)
 	return true
+}
+
+// BeginSave establishes the point after which cancellation cannot claim that no
+// account was saved. No lock is held over provider hooks or credential storage.
+// Complete/SetError finish this state; a second saver cannot enter it.
+func (s *oauthSessionStore) BeginSave(state, provider string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeExpiredLocked(time.Now())
+	session, found := s.sessions[state]
+	if !found || session.Completed || session.Committing || session.Status != "" || !strings.EqualFold(session.Provider, provider) {
+		return false
+	}
+	session.Committing = true
+	s.sessions[state] = session
+	return true
+}
+
+func beginOAuthSessionSave(state, provider string) error {
+	if oauthSessions.BeginSave(state, provider) {
+		return nil
+	}
+	return errOAuthSessionNotPending
 }
 
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
