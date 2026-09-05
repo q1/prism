@@ -145,6 +145,9 @@ type ModelRegistry struct {
 	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
 	// This preserves the original model info provided by each client
 	clientModelInfos map[string]map[string]*ModelInfo
+	// prismClientCatalogs retains model-only observations when a client is
+	// unavailable. It is never consulted by routing or active model discovery.
+	prismClientCatalogs map[string]prismClientCatalog
 	// clientProviders maps client ID to its provider identifier
 	clientProviders map[string]string
 	// clientEpochs tracks monotonic registration epochs for each client ID
@@ -307,6 +310,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	}
 
 	provider := strings.ToLower(clientProvider)
+	r.setPrismModelCatalogLocked(clientID, provider, models)
 	uniqueModelIDs := make([]string, 0, len(models))
 	rawModelIDs := make([]string, 0, len(models))
 	newModels := make(map[string]*ModelInfo, len(models))

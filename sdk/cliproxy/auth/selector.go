@@ -799,13 +799,16 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
+	if present, valid := prismServingLease(auth, now); present && !valid {
+		return true, blockReasonDisabled, time.Time{}
+	}
 	if auth.Disabled || auth.Status == StatusDisabled || auth.RequiresLogin() {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if blocked, until := observedQuotaBlocked(auth, now); blocked {
+	if blocked, until := observedQuotaBlocked(auth, model, now); blocked {
 		return true, blockReasonCooldown, until
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {

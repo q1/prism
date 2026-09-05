@@ -233,8 +233,11 @@ type QuotaExceeded struct {
 
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
+	// PrismPolicy keeps subscription freshness/reserve eligibility active when
+	// administrators choose a different balancing order. Legacy installs opt in.
+	PrismPolicy bool `yaml:"prism-policy,omitempty" json:"prism-policy,omitempty"`
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "reset-priority".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.

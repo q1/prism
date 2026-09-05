@@ -188,6 +188,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		Timeout: defaultAPICallTimeout,
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
+	if c.GetHeader("X-Prism-Panel-Usage") == "1" {
+		// The gateway authorizes a fixed provider usage origin. A redirect must
+		// never forward the resolved OAuth token to another path or origin.
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -201,7 +206,15 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 	}()
 
-	respBody, errReadAll := io.ReadAll(resp.Body)
+	var responseReader io.Reader = resp.Body
+	if c.GetHeader("X-Prism-Panel-Usage") == "1" {
+		responseReader = io.LimitReader(resp.Body, 131073)
+	}
+	respBody, errReadAll := io.ReadAll(responseReader)
+	if c.GetHeader("X-Prism-Panel-Usage") == "1" && len(respBody) > 131072 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "prism_usage_response_too_large"})
+		return
+	}
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return

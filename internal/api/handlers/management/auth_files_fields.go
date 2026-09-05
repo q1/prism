@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,6 +55,13 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	targetAuth, _ := h.lookupAuthFile(name, authIndex)
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if c.GetHeader("X-Prism-Panel") == "1" {
+		h.prismPanelPatchAccount(c, targetAuth.ID, func(latest *coreauth.Auth) error {
+			applyAuthDisabledState(latest, *req.Disabled)
+			return nil
+		})
 		return
 	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
@@ -273,6 +281,31 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
 	}
+	if c.GetHeader("X-Prism-Panel") == "1" {
+		for path := range req {
+			if !prismPanelOwnerField(path) {
+				c.JSON(http.StatusConflict, gin.H{"error": "prism_account_field_requires_operator"})
+				return
+			}
+		}
+		h.prismPanelPatchAccount(c, targetAuth.ID, func(latest *coreauth.Auth) error {
+			return applyAuthFileFields(latest, req, requestRetryPatch)
+		})
+		return
+	}
+	if errApply := applyAuthFileFields(targetAuth, req, requestRetryPatch); errApply != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errApply.Error()})
+		return
+	}
+	targetAuth.UpdatedAt = time.Now()
+	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func applyAuthFileFields(targetAuth *coreauth.Auth, req map[string]json.RawMessage, requestRetryPatch authFileRequestRetryPatch) error {
 	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
 
 	changed := false
@@ -280,41 +313,52 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	for key, rawValue := range req {
 		fieldPath := strings.TrimSpace(key)
 		if fieldPath == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "field name is required"})
-			return
+			return errors.New("field name is required")
 		}
 		value, errDecode := decodeAuthFileFieldValue(rawValue)
 		if errDecode != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
-			return
+			return fmt.Errorf("invalid field %s", fieldPath)
 		}
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
 
-		if fieldPath == coreauth.AttributeWeight {
+		if rootAuthFileField(fieldPath) == coreauth.PrismReservePercentKey {
+			if fieldPath != coreauth.PrismReservePercentKey {
+				return errors.New("reserve_percent does not support nested fields")
+			}
+			if value != nil {
+				number, ok := value.(json.Number)
+				if !ok {
+					return errors.New("reserve_percent must be a number from 0 to 100 or null")
+				}
+				percent, errPercent := number.Float64()
+				if errPercent != nil || math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 || percent > 100 {
+					return errors.New("reserve_percent must be a number from 0 to 100 or null")
+				}
+				value = percent
+			}
+			// Null is durable and means disabled, distinct from an absent default.
+			targetAuth.Metadata[coreauth.PrismReservePercentKey] = value
+		} else if fieldPath == coreauth.AttributeWeight {
 			if value == nil {
 				delete(targetAuth.Metadata, coreauth.AttributeWeight)
 			} else {
 				if _, okNumber := value.(json.Number); !okNumber {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "weight must be an integer"})
-					return
+					return errors.New("weight must be an integer")
 				}
 				weight, errWeight := credentialweight.ParseValue(value)
 				if errWeight != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
-					return
+					return errWeight
 				}
 				targetAuth.Metadata[coreauth.AttributeWeight] = weight
 			}
 		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
-			return
+			return errors.New("weight does not support nested fields")
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
-			return
+			return errSet
 		}
 		if root := rootAuthFileField(fieldPath); root != "" {
 			touchedRoots[root] = struct{}{}
@@ -337,18 +381,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	if !changed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
-		return
+		return errors.New("no fields to update")
 	}
 
-	targetAuth.UpdatedAt = time.Now()
-
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return nil
 }
 
 func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {

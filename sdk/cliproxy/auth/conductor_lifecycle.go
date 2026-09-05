@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -196,6 +197,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
 	}
+	if mode == updateModeReplace && prismSameServingCredential(existing, auth) {
+		auth.Quota = existing.Quota.Clone()
+		auth.ModelStates = existing.Clone().ModelStates
+		auth.Unavailable, auth.NextRetryAfter, auth.Status = existing.Unavailable, existing.NextRetryAfter, existing.Status
+	}
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
@@ -252,13 +258,18 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
-	_ = ctx
-
 	m.mu.Lock()
+	provider, tombstoneEpoch, removed := m.removeAuthLocked(id)
+	m.mu.Unlock()
+	if removed {
+		m.afterAuthRemoval(ctx, id, provider, tombstoneEpoch)
+	}
+}
+
+func (m *Manager) removeAuthLocked(id string) (string, uint64, bool) {
 	existing := m.auths[id]
 	if existing == nil {
-		m.mu.Unlock()
-		return
+		return "", 0, false
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -281,9 +292,10 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		m.authEpochs[id] = existing.RegistrationEpoch
 	}
 	m.authEpochs[id]++
-	tombstoneEpoch := m.authEpochs[id]
-	m.mu.Unlock()
+	return provider, m.authEpochs[id], true
+}
 
+func (m *Manager) afterAuthRemoval(ctx context.Context, id, provider string, tombstoneEpoch uint64) {
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
@@ -383,7 +395,16 @@ type authPersistLock struct {
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
+	return m.persistAccount(ctx, auth, false)
+}
+
+func (m *Manager) persistAccount(ctx context.Context, auth *Auth, imported bool) error {
 	if m.store == nil || auth == nil {
+		return nil
+	}
+	// Signed serving generations are immutable. Request preparation and quota
+	// observations may update memory but cannot rewrite a recipient credential.
+	if _, leased := auth.Metadata["prism_serving_expires_at"]; leased {
 		return nil
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
@@ -405,6 +426,16 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 
+	save := m.store.Save
+	if imported {
+		importer, ok := m.store.(interface {
+			SaveImported(context.Context, *Auth) (string, error)
+		})
+		if !ok {
+			return ErrAccountPolicyUnsupported
+		}
+		save = importer.SaveImported
+	}
 	lockVal, _ := m.persistLocks.LoadOrStore(auth.ID, &authPersistLock{})
 	pLock, _ := lockVal.(*authPersistLock)
 	if pLock != nil {
@@ -413,18 +444,20 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		if auth.RegistrationEpoch < pLock.lastEpoch || (auth.RegistrationEpoch == pLock.lastEpoch && auth.Generation < pLock.lastGeneration) {
 			return nil
 		}
-		pLock.lastEpoch = auth.RegistrationEpoch
-		pLock.lastGeneration = auth.Generation
 		if shouldSkipPersist(ctx) {
+			pLock.lastEpoch, pLock.lastGeneration = auth.RegistrationEpoch, auth.Generation
 			return nil
 		}
-		_, err := m.store.Save(ctx, auth)
+		_, err := save(ctx, auth)
+		if err == nil || errors.Is(err, ErrPersistenceDurabilityUncertain) {
+			pLock.lastEpoch, pLock.lastGeneration = auth.RegistrationEpoch, auth.Generation
+		}
 		return err
 	}
 
 	if shouldSkipPersist(ctx) {
 		return nil
 	}
-	_, err := m.store.Save(ctx, auth)
+	_, err := save(ctx, auth)
 	return err
 }

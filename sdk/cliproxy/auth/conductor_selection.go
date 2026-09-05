@@ -505,6 +505,34 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // priority tiers so an established binding can be validated instead of being preempted by a
 // recovered higher-priority credential.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time) (priorityAuths, selectorAuths []*Auth, err error) {
+	if m.prismPolicyEnabled(selector) {
+		policy := resetPrioritySelector(selector)
+		if policy == nil {
+			policy = &ResetPrioritySelector{}
+		}
+		candidates := cloneAuthSlice(auths)
+		eligible := make([]*Auth, 0, len(candidates))
+		for _, account := range candidates {
+			if account.Attributes == nil {
+				account.Attributes = map[string]string{}
+			}
+			account.Attributes["prism_selection_model"] = m.selectionModelKeyForAuth(account, routeModel)
+			if PrismAccountEligibility(account, routeModel, now).Available {
+				eligible = append(eligible, account)
+			}
+		}
+		// The Prism selector owns classification as well as eligibility. Filtering
+		// first would erase whether the pool is exhausted, reserved or unverified.
+		if len(eligible) == 0 {
+			_, errUnavailable := policy.Pick(context.Background(), provider, routeModel, cliproxyexecutor.Options{}, candidates)
+			return nil, nil, errUnavailable
+		}
+		if _, affinity := selector.(*SessionAffinitySelector); affinity || resetPrioritySelector(selector) == nil {
+			// A sticky binding must not bypass reserve or observation eligibility.
+			return highestPriorityAuths(eligible), eligible, nil
+		}
+		return highestPriorityAuths(eligible), candidates, nil
+	}
 	if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
 		if err != nil {
@@ -1436,7 +1464,7 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 }
 
 func (m *Manager) useSchedulerFastPath() bool {
-	if m == nil || m.scheduler == nil {
+	if m == nil || m.scheduler == nil || m.PrismPolicyEnabled() {
 		return false
 	}
 	return isBuiltInSelector(m.Selector())
