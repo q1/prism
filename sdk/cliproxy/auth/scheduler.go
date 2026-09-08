@@ -1086,7 +1086,7 @@ func (m *modelScheduler) removeEntryLocked(authID string) {
 	m.rebuildIndexesLocked()
 }
 
-// demoteExpiredTokensLocked checks ready auths and demotes any whose access token has expired.
+// demoteExpiredTokensLocked demotes ready auths whose token or serving lease has expired.
 func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
 	if m == nil || len(m.entries) == 0 {
 		return false
@@ -1096,7 +1096,9 @@ func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
 		if entry == nil || entry.auth == nil || entry.state != scheduledStateReady {
 			continue
 		}
-		if exp, ok := entry.auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		exp, hasExpiry := entry.auth.AccessTokenExpirationTime()
+		leased, validLease := prismServingLease(entry.auth, now)
+		if (hasExpiry && !exp.IsZero() && !exp.After(now)) || (leased && !validLease) {
 			blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
 			if blocked {
 				switch {
@@ -1118,7 +1120,7 @@ func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
 }
 
 // promoteExpiredLocked reevaluates blocked auths whose retry time has elapsed
-// and demotes ready auths whose access token has expired.
+// and demotes ready auths whose access token or serving lease has expired.
 func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 	if m == nil {
 		return
