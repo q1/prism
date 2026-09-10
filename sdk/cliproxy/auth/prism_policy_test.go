@@ -208,3 +208,53 @@ func TestPrismServingLeaseIsMandatoryForEverySelector(t *testing.T) {
 		t.Fatal("malformed serving lease accepted")
 	}
 }
+
+func TestPrismAffinityRechecksObservedQuotaAfterBinding(t *testing.T) {
+	ctx := context.Background()
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	t.Cleanup(selector.Stop)
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&config.Config{Routing: config.RoutingConfig{PrismPolicy: true}})
+	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "claude"})
+	const model = "claude-fable-5-1"
+	account := prismClaudeFixture(t.Name(), time.Now(), time.Hour, 24*time.Hour, 50)
+	if _, err := manager.Register(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(account.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(account.ID) })
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"fixture-session"}}}
+	if _, err := manager.SelectAuth(ctx, "claude", model, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, status := manager.LookupSessionAffinity("claude", model, "fixture-session"); status != "bound" {
+		t.Fatalf("expected established affinity, got %s", status)
+	}
+	update := func(quota QuotaState, reserve any) {
+		t.Helper()
+		current, _ := manager.GetByID(account.ID)
+		current.Quota = quota
+		current.Metadata = map[string]any{PrismReservePercentKey: reserve}
+		if _, err := manager.Update(ctx, current); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reserved := prismClaudeFixture(account.ID, time.Now(), time.Hour, 24*time.Hour, 2).Quota
+	update(reserved, float64(3))
+	assertBlocked := func(reason string) {
+		t.Helper()
+		_, err := manager.SelectAuth(ctx, "claude", model, opts)
+		var pool *prismPoolError
+		if !errors.As(err, &pool) || pool.reason != reason {
+			t.Fatalf("bound session bypassed %s: %v", reason, err)
+		}
+	}
+	assertBlocked("reserve_avoided")
+	update(reserved, nil)
+	if _, err := manager.SelectAuth(ctx, "claude", model, opts); err != nil {
+		t.Fatalf("null reserve did not restore observed allowance: %v", err)
+	}
+	update(QuotaState{}, nil)
+	assertBlocked("quota_unknown")
+}

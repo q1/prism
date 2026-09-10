@@ -106,9 +106,6 @@ func TestRefreshAuthFiles_AllAndSpecific(t *testing.T) {
 		t.Fatalf("expected ok=true, got %v", resp)
 	}
 
-	// Wait briefly for refresh to execute
-	time.Sleep(50 * time.Millisecond)
-
 	if cnt := exec.refreshCnt.Load(); cnt < 2 {
 		t.Fatalf("expected at least 2 refreshes, got %d", cnt)
 	}
@@ -130,6 +127,26 @@ func TestRefreshAuthFiles_AllAndSpecific(t *testing.T) {
 	}
 	if newCnt := exec.refreshCnt.Load(); newCnt != prevCnt+1 {
 		t.Fatalf("expected cnt to increment by 1, was %d now %d", prevCnt, newCnt)
+	}
+	var receipt struct {
+		OK   bool           `json:"ok"`
+		Auth map[string]any `json:"auth"`
+	}
+	if err := json.Unmarshal(wSingle.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.OK || receipt.Auth["id"] != auth1.ID || receipt.Auth["status"] != string(coreauth.StatusActive) {
+		t.Fatal("refresh receipt lost account lifecycle state")
+	}
+	for _, field := range []string{"metadata", "attributes", "storage", "proxy_url", "access_token", "refresh_token"} {
+		if _, exists := receipt.Auth[field]; exists {
+			t.Fatalf("refresh receipt exposes private field %s", field)
+		}
+	}
+	for _, token := range []string{"refreshed-token", "refresh-token", "old-1", "ref-1"} {
+		if strings.Contains(wSingle.Body.String(), token) {
+			t.Fatal("refresh receipt exposes fixture credential")
+		}
 	}
 
 	// 4. Refresh nonexistent file
@@ -162,5 +179,32 @@ func TestRefreshAuthFiles_AllAndSpecific(t *testing.T) {
 
 	if wBadJSON.Code != http.StatusBadRequest {
 		t.Fatalf("expected malformed JSON to return 400, got %d", wBadJSON.Code)
+	}
+}
+
+func TestRefreshAuthFilesPrismPanelRevisionAndReplay(t *testing.T) {
+	handler, router, manager := controlFixture(t)
+	executor := &refreshRecordExecutor{provider: "claude"}
+	manager.RegisterExecutor(executor)
+	const path = "/v0/management/auth-files/refresh"
+	router.POST(path, handler.PrismReplicaMiddleware(), handler.PrismControlMiddleware(), handler.RefreshAuthFiles)
+	revision := controlRevision(t, router)
+	const operation = "00000000-0000-4000-8000-000000000091"
+	response := panelCall(router, http.MethodPost, path, revision, operation, `{"name":"test.json"}`)
+	if response.Code != http.StatusOK || executor.refreshCnt.Load() != 1 || response.Header().Get("X-Prism-Settings-Revision") == revision {
+		t.Fatal("manual refresh did not participate in panel revision protocol")
+	}
+	replay := panelCall(router, http.MethodPost, path, revision, operation, `{"name":"test.json"}`)
+	if replay.Code != http.StatusConflict || executor.refreshCnt.Load() != 1 {
+		t.Fatal("replayed operation refreshed twice")
+	}
+	stale := panelCall(router, http.MethodPost, path, revision, "00000000-0000-4000-8000-000000000092", `{"all":true}`)
+	if stale.Code != http.StatusConflict || executor.refreshCnt.Load() != 1 {
+		t.Fatal("stale panel revision reached bulk refresh")
+	}
+	handler.cfg.PrismReplica = true
+	blocked := panelCall(router, http.MethodPost, path, controlRevision(t, router), "00000000-0000-4000-8000-000000000093", `{"all":true}`)
+	if blocked.Code != http.StatusForbidden || executor.refreshCnt.Load() != 1 {
+		t.Fatal("replica reached manual refresh")
 	}
 }

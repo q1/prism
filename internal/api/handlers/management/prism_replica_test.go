@@ -17,6 +17,7 @@ func TestPrismReplicaBlocksLegacyAndVersionedMutations(t *testing.T) {
 		status       int
 	}{
 		{http.MethodPost, "/v0/management/prism/control", 403}, {http.MethodPatch, "/v0/management/auth-files/fields", 403},
+		{http.MethodPost, "/v0/management/auth-files/refresh", 403},
 		{http.MethodPut, "/v0/management/config.yaml", 403}, {http.MethodGet, "/v0/management/anthropic-auth-url", 403},
 		{http.MethodGet, "/v0/management/oauth-callback", 403}, {http.MethodPost, "/v0/management/oauth-callback", 403},
 		{http.MethodGet, "/v0/management/prism/models", 200}, {http.MethodGet, "/v0/management/auth-files", 200},

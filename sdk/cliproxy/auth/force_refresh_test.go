@@ -127,3 +127,36 @@ func TestManager_ForceRefreshAuth_PreservesErrorOnFailure(t *testing.T) {
 		t.Fatal("LastError should not be wiped on failure")
 	}
 }
+
+func TestManager_ForceRefreshPreservesPrismRefreshFences(t *testing.T) {
+	for _, provider := range []string{"claude", "codex", "xai"} {
+		for _, fence := range []string{"refresh_disabled", "requires_login"} {
+			t.Run(provider+"/"+fence, func(t *testing.T) {
+				ctx := context.Background()
+				manager := NewManager(nil, &RoundRobinSelector{}, nil)
+				executor := &countingRefreshExecutor{id: provider}
+				manager.RegisterExecutor(executor)
+				credential := &Auth{ID: "fixture-fenced", Provider: provider, Metadata: map[string]any{
+					"access_token": "fixture-access", "refresh_token": "fixture-refresh", fence: true,
+				}}
+				if _, err := manager.Register(ctx, credential); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := manager.ForceRefreshAuth(ctx, credential.ID); err == nil {
+					t.Fatal("manual refresh bypassed credential fence")
+				}
+				results := manager.ForceRefreshAll(ctx)
+				if len(results) != 1 || results[0].Success || results[0].Error == "" {
+					t.Fatal("bulk refresh did not report the fenced credential")
+				}
+				if executor.refreshCalls.Load() != 0 {
+					t.Fatal("manual refresh reached provider for fenced credential")
+				}
+				current, ok := manager.GetByID(credential.ID)
+				if !ok || current.Metadata[fence] != true || current.Metadata["access_token"] != "fixture-access" {
+					t.Fatal("manual refresh changed fenced credential state")
+				}
+			})
+		}
+	}
+}

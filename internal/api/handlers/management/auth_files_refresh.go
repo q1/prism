@@ -70,7 +70,18 @@ func (h *Handler) RefreshAuthFiles(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"ok":   true,
-		"auth": refreshed,
+		"ok": true,
+		// A refresh receipt exposes lifecycle state, never the credential's
+		// metadata, custom headers, storage paths or provider tokens.
+		"auth": gin.H{
+			"id":                 refreshed.ID,
+			"provider":           refreshed.Provider,
+			"status":             refreshed.Status,
+			"disabled":           refreshed.Disabled,
+			"unavailable":        refreshed.Unavailable,
+			"last_refreshed_at":  refreshed.LastRefreshedAt,
+			"next_refresh_after": refreshed.NextRefreshAfter,
+			"requires_login":     refreshed.RequiresLogin(),
+		},
 	})
 }
