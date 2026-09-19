@@ -628,11 +628,16 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 			_, errUnavailable := policy.Pick(context.Background(), provider, routeModel, cliproxyexecutor.Options{}, candidates)
 			return nil, nil, errUnavailable
 		}
+		priorityAuths = highestPriorityAuths(eligible)
+		if m.pluginSchedulerWantsAcrossPrioritiesLocked() {
+			// Upstream's scheduler opt-in broadens priority tiers, never Prism eligibility.
+			priorityAuths = eligible
+		}
 		if _, affinity := selector.(*SessionAffinitySelector); affinity || resetPrioritySelector(selector) == nil {
 			// A sticky binding must not bypass reserve or observation eligibility.
-			return highestPriorityAuths(eligible), eligible, nil
+			return priorityAuths, eligible, nil
 		}
-		return highestPriorityAuths(eligible), candidates, nil
+		return priorityAuths, candidates, nil
 	}
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 	schedulerAcross := m.pluginSchedulerWantsAcrossPrioritiesLocked()

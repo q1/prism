@@ -729,7 +729,7 @@ func (h *Handler) RequestMetaToken(c *gin.Context) {
 			Metadata:   metadata,
 			Attributes: attrs,
 		}
-		if errGuard := guardOAuthSessionPendingForSave(state, "meta"); errGuard != nil {
+		if errGuard := beginOAuthSessionSave(state, "meta"); errGuard != nil {
 			return
 		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)

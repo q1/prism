@@ -30,6 +30,39 @@ func prismClaudeFixture(id string, now time.Time, shortReset, weeklyReset time.D
 	}}
 }
 
+func TestPrismPluginAcrossPrioritiesKeepsQuotaEligibility(t *testing.T) {
+	for _, across := range []bool{false, true} {
+		t.Run(fmt.Sprint(across), func(t *testing.T) {
+			now := time.Now()
+			selector := &RoundRobinSelector{}
+			manager := NewManager(nil, selector, nil)
+			manager.SetConfig(&config.Config{Routing: config.RoutingConfig{PrismPolicy: true}})
+			manager.SetPluginScheduler(&fakePluginScheduler{acrossPriorities: across})
+			high := prismClaudeFixture("high", now, time.Hour, 24*time.Hour, 50)
+			high.Attributes["priority"] = "10"
+			low := prismClaudeFixture("low", now, time.Hour, 24*time.Hour, 50)
+			low.Attributes["priority"] = "1"
+			reserved := prismClaudeFixture("reserved", now, time.Hour, 24*time.Hour, 1)
+			reserved.Attributes["priority"] = "20"
+			manager.mu.RLock()
+			candidates, _, errAvailable := manager.availableAuthsForSelector(selector, []*Auth{high, low, reserved}, "claude", "claude-fable-5-1", now)
+			manager.mu.RUnlock()
+			want := 1
+			if across {
+				want = 2
+			}
+			if errAvailable != nil || len(candidates) != want {
+				t.Fatalf("scheduler candidates = %d, want %d; error %v", len(candidates), want, errAvailable)
+			}
+			for _, candidate := range candidates {
+				if candidate.ID == reserved.ID {
+					t.Fatal("plugin received a reserved account")
+				}
+			}
+		})
+	}
+}
+
 func TestPrismEligibilityScenarioMatrix(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	cases := []struct {

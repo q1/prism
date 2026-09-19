@@ -121,7 +121,7 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 		}
 		return
 	}
-	if errGuard := guardOAuthSessionPendingForSave(state, "devin"); errGuard != nil {
+	if errGuard := beginOAuthSessionSave(state, "devin"); errGuard != nil {
 		return
 	}
 	if _, errSave := h.saveTokenRecord(ctx, record); errSave != nil {

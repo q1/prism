@@ -25,6 +25,13 @@ func TestServingCredentialNeverRefreshes(t *testing.T) {
 			if _, err := manager.refreshAuthForRequest(context.Background(), credential.ID, "expired-test-access"); err == nil {
 				t.Fatal("explicit refresh was accepted")
 			}
+			if _, err := manager.ForceRefreshAuth(context.Background(), credential.ID); err == nil {
+				t.Fatal("management forced refresh bypassed serving ownership")
+			}
+			results := manager.ForceRefreshAll(context.Background())
+			if len(results) != 1 || results[0].Success {
+				t.Fatal("bulk management refresh bypassed serving ownership")
+			}
 			if _, scheduled := nextRefreshCheckAt(time.Now(), credential, time.Second); scheduled {
 				t.Fatal("serving credential queued for refresh")
 			}

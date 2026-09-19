@@ -72,7 +72,7 @@ func (h *Handler) prismPanelAccountTransaction(c *gin.Context) bool {
 		h.prismPanelImportAccount(c)
 		return true
 	}
-	if path == "/vertex/import" || strings.HasPrefix(path, "/plugins/") || strings.HasPrefix(path, "/plugin-store/") {
+	if path == "/vertex/import" || path == "/quota/fetch" || path == "/quota/reset" || strings.HasPrefix(path, "/plugins/") || strings.HasPrefix(path, "/plugin-store/") {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": "prism_operation_requires_operator"})
 		return true
 	}
